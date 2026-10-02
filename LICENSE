@@ -1,121 +1,876 @@
-Creative Commons Legal Code
+{
+  "name": "order-tracking-system",
+  "version": "1.0.0",
+  "description": "Order tracking system for sellers and customers",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "pg": "^8.12.0"
+  }
+}
+PORT=3000
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=order_tracking_db
+DB_USER=postgres
+DB_PASSWORD=postgres
 
-CC0 1.0 Universal
+CLIENT_TRACKING_URL=http://localhost:3000/track
 
-    CREATIVE COMMONS CORPORATION IS NOT A LAW FIRM AND DOES NOT PROVIDE
-    LEGAL SERVICES. DISTRIBUTION OF THIS DOCUMENT DOES NOT CREATE AN
-    ATTORNEY-CLIENT RELATIONSHIP. CREATIVE COMMONS PROVIDES THIS
-    INFORMATION ON AN "AS-IS" BASIS. CREATIVE COMMONS MAKES NO WARRANTIES
-    REGARDING THE USE OF THIS DOCUMENT OR THE INFORMATION OR WORKS
-    PROVIDED HEREUNDER, AND DISCLAIMS LIABILITY FOR DAMAGES RESULTING FROM
-    THE USE OF THIS DOCUMENT OR THE INFORMATION OR WORKS PROVIDED
-    HEREUNDER.
+SMS_PROVIDER=netgsm
+SMS_API_USERNAME=your_netgsm_username
+SMS_API_PASSWORD=your_netgsm_password
+SMS_API_SENDER=ORDERTR
+SMS_API_URL=https://api.netgsm.com.tr/sms/send
+const express = require('express');
+const cors = require('cors');
+const dotenv = require('dotenv');
+const { Pool } = require('pg');
 
-Statement of Purpose
+dotenv.config();
+const app = express();
+const port = process.env.PORT || 3000;
 
-The laws of most jurisdictions throughout the world automatically confer
-exclusive Copyright and Related Rights (defined below) upon the creator
-and subsequent owner(s) (each and all, an "owner") of an original work of
-authorship and/or a database (each, a "Work").
+// PostgreSQL connection
+const pool = new Pool({
+  host: process.env.DB_HOST || 'localhost',
+  port: Number(process.env.DB_PORT || 5432),
+  database: process.env.DB_NAME || 'order_tracking_db',
+  user: process.env.DB_USER || 'postgres',
+  password: process.env.DB_PASSWORD || 'postgres',
+  max: 10,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000
+});
 
-Certain owners wish to permanently relinquish those rights to a Work for
-the purpose of contributing to a commons of creative, cultural and
-scientific works ("Commons") that the public can reliably and without fear
-of later claims of infringement build upon, modify, incorporate in other
-works, reuse and redistribute as freely as possible in any form whatsoever
-and for any purposes, including without limitation commercial purposes.
-These owners may contribute to the Commons to promote the ideal of a free
-culture and the further production of creative, cultural and scientific
-works, or to gain reputation or greater distribution for their Work in
-part through the use and efforts of others.
+async function initDb() {
+  const schema = `
+    CREATE TABLE IF NOT EXISTS customers (
+      id SERIAL PRIMARY KEY,
+      name VARCHAR(150) NOT NULL,
+      phone VARCHAR(25) NOT NULL UNIQUE,
+      email VARCHAR(150),
+      created_at TIMESTAMP DEFAULT NOW()
+    );
 
-For these and/or other purposes and motivations, and without any
-expectation of additional consideration or compensation, the person
-associating CC0 with a Work (the "Affirmer"), to the extent that he or she
-is an owner of Copyright and Related Rights in the Work, voluntarily
-elects to apply CC0 to the Work and publicly distribute the Work under its
-terms, with knowledge of his or her Copyright and Related Rights in the
-Work and the meaning and intended legal effect of CC0 on those rights.
+    CREATE TABLE IF NOT EXISTS orders (
+      id SERIAL PRIMARY KEY,
+      order_code VARCHAR(50) NOT NULL UNIQUE,
+      customer_id INT REFERENCES customers(id) ON DELETE CASCADE,
+      customer_name VARCHAR(150) NOT NULL,
+      customer_phone VARCHAR(25) NOT NULL,
+      shipping_address TEXT NOT NULL,
+      order_details TEXT,
+      total_amount NUMERIC(10,2) DEFAULT 0,
+      status VARCHAR(30) NOT NULL DEFAULT 'siparis_alindi',
+      tracking_link TEXT NOT NULL,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    );
 
-1. Copyright and Related Rights. A Work made available under CC0 may be
-protected by copyright and related or neighboring rights ("Copyright and
-Related Rights"). Copyright and Related Rights include, but are not
-limited to, the following:
+    CREATE TABLE IF NOT EXISTS sms_logs (
+      id SERIAL PRIMARY KEY,
+      order_id INT REFERENCES orders(id) ON DELETE CASCADE,
+      customer_phone VARCHAR(25) NOT NULL,
+      message TEXT NOT NULL,
+      provider VARCHAR(50) DEFAULT 'netgsm',
+      status VARCHAR(20) NOT NULL DEFAULT 'sent',
+      created_at TIMESTAMP DEFAULT NOW()
+    );
 
-  i. the right to reproduce, adapt, distribute, perform, display,
-     communicate, and translate a Work;
- ii. moral rights retained by the original author(s) and/or performer(s);
-iii. publicity and privacy rights pertaining to a person's image or
-     likeness depicted in a Work;
- iv. rights protecting against unfair competition in regards to a Work,
-     subject to the limitations in paragraph 4(a), below;
-  v. rights protecting the extraction, dissemination, use and reuse of data
-     in a Work;
- vi. database rights (such as those arising under Directive 96/9/EC of the
-     European Parliament and of the Council of 11 March 1996 on the legal
-     protection of databases, and under any national implementation
-     thereof, including any amended or successor version of such
-     directive); and
-vii. other similar, equivalent or corresponding rights throughout the
-     world based on applicable law or treaty, and any national
-     implementations thereof.
+    CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+    CREATE INDEX IF NOT EXISTS idx_orders_code ON orders(order_code);
+    CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers(phone);
+  `;
 
-2. Waiver. To the greatest extent permitted by, but not in contravention
-of, applicable law, Affirmer hereby overtly, fully, permanently,
-irrevocably and unconditionally waives, abandons, and surrenders all of
-Affirmer's Copyright and Related Rights and associated claims and causes
-of action, whether now known or unknown (including existing as well as
-future claims and causes of action), in the Work (i) in all territories
-worldwide, (ii) for the maximum duration provided by applicable law or
-treaty (including future time extensions), (iii) in any current or future
-medium and for any number of copies, and (iv) for any purpose whatsoever,
-including without limitation commercial, advertising or promotional
-purposes (the "Waiver"). Affirmer makes the Waiver for the benefit of each
-member of the public at large and to the detriment of Affirmer's heirs and
-successors, fully intending that such Waiver shall not be subject to
-revocation, rescission, cancellation, termination, or any other legal or
-equitable action to disrupt the quiet enjoyment of the Work by the public
-as contemplated by Affirmer's express Statement of Purpose.
+  const statements = schema
+    .split(';')
+    .map(s => s.trim())
+    .filter(Boolean);
 
-3. Public License Fallback. Should any part of the Waiver for any reason
-be judged legally invalid or ineffective under applicable law, then the
-Waiver shall be preserved to the maximum extent permitted taking into
-account Affirmer's express Statement of Purpose. In addition, to the
-extent the Waiver is so judged Affirmer hereby grants to each affected
-person a royalty-free, non transferable, non sublicensable, non exclusive,
-irrevocable and unconditional license to exercise Affirmer's Copyright and
-Related Rights in the Work (i) in all territories worldwide, (ii) for the
-maximum duration provided by applicable law or treaty (including future
-time extensions), (iii) in any current or future medium and for any number
-of copies, and (iv) for any purpose whatsoever, including without
-limitation commercial, advertising or promotional purposes (the
-"License"). The License shall be deemed effective as of the date CC0 was
-applied by Affirmer to the Work. Should any part of the License for any
-reason be judged legally invalid or ineffective under applicable law, such
-partial invalidity or ineffectiveness shall not invalidate the remainder
-of the License, and in such case Affirmer hereby affirms that he or she
-will not (i) exercise any of his or her remaining Copyright and Related
-Rights in the Work or (ii) assert any associated claims and causes of
-action with respect to the Work, in either case contrary to Affirmer's
-express Statement of Purpose.
+  for (const statement of statements) {
+    await pool.query(statement);
+  }
+}
 
-4. Limitations and Disclaimers.
+function normalizePhone(phone) {
+  if (!phone) return '';
+  return String(phone).replace(/\\s+/g, '').replace(/[^0-9+]/g, '');
+}
 
- a. No trademark or patent rights held by Affirmer are waived, abandoned,
-    surrendered, licensed or otherwise affected by this document.
- b. Affirmer offers the Work as-is and makes no representations or
-    warranties of any kind concerning the Work, express, implied,
-    statutory or otherwise, including without limitation warranties of
-    title, merchantability, fitness for a particular purpose, non
-    infringement, or the absence of latent or other defects, accuracy, or
-    the present or absence of errors, whether or not discoverable, all to
-    the greatest extent permissible under applicable law.
- c. Affirmer disclaims responsibility for clearing rights of other persons
-    that may apply to the Work or any use thereof, including without
-    limitation any person's Copyright and Related Rights in the Work.
-    Further, Affirmer disclaims responsibility for obtaining any necessary
-    consents, permissions or other rights required for any use of the
-    Work.
- d. Affirmer understands and acknowledges that Creative Commons is not a
-    party to this document and has no duty or obligation with respect to
-    this CC0 or use of the Work.
+const STATUS_LABELS = {
+  siparis_alindi: 'Sipariş Alındı',
+  hazirlaniyor: 'Hazırlanıyor',
+  yola_cikti: 'Yola Çıktı',
+  teslim_edildi: 'Teslim Edildi'
+};
+
+const STATUS_MESSAGES = {
+  siparis_alindi: 'Siparişiniz alındı.',
+  hazirlaniyor: 'Siparişiniz hazırlanıyor.',
+  yola_cikti: 'Siparişiniz yola çıktı.',
+  teslim_edildi: 'Siparişiniz teslim edildi.'
+};
+
+async function sendSms({ phone, message }) {
+  const provider = process.env.SMS_PROVIDER || 'netgsm';
+  const username = process.env.SMS_API_USERNAME;
+  const password = process.env.SMS_API_PASSWORD;
+  const sender = process.env.SMS_API_SENDER || 'ORDERTR';
+  const apiUrl = process.env.SMS_API_URL || '';
+
+  const cleanPhone = normalizePhone(phone);
+
+  if (!cleanPhone) {
+    return { success: false, simulated: false, message: 'Telefon numarası geçersiz.' };
+  }
+
+  if (!apiUrl || !username || !password) {
+    return {
+      success: true,
+      simulated: true,
+      provider,
+      message: 'SMS sağlayıcısı yapılandırılmadı; simülasyon modu aktif.'
+    };
+  }
+
+  try {
+    const payload = new URLSearchParams({
+      username,
+      password,
+      sender,
+      gsm: cleanPhone,
+      message
+    });
+
+    const response = await fetch(apiUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: payload.toString()
+    });
+
+    const raw = await response.text();
+
+    return {
+      success: response.ok,
+      simulated: false,
+      provider,
+      raw
+    };
+  } catch (error) {
+    return {
+      success: false,
+      simulated: false,
+      provider,
+      message: error.message
+    };
+  }
+}
+
+async function sendStatusSms(order) {
+  const statusKey = order.status || 'siparis_alindi';
+  const statusText = STATUS_MESSAGES[statusKey] || 'Siparişiniz güncellendi.';
+  const message = `${statusText} Sipariş Kodu: ${order.order_code}. Takip Linki: ${order.tracking_link}`;
+
+  return await sendSms({
+    phone: order.customer_phone,
+    message
+  });
+}
+
+async function ensureCustomer({ name, phone, email }) {
+  const cleanPhone = normalizePhone(phone);
+
+  if (!cleanPhone) {
+    throw new Error('Telefon numarası gerekli.');
+  }
+
+  const existing = await pool.query(
+    'SELECT * FROM customers WHERE phone = $1 LIMIT 1',
+    [cleanPhone]
+  );
+
+  if (existing.rows.length > 0) {
+    return existing.rows[0];
+  }
+
+  const result = await pool.query(
+    `INSERT INTO customers (name, phone, email)
+     VALUES ($1, $2, $3)
+     RETURNING *`,
+    [name || 'Müşteri', cleanPhone, email || null]
+  );
+
+  return result.rows[0];
+}
+
+app.use(cors());
+app.use(express.json({ limit: '2mb' }));
+app.use(express.urlencoded({ extended: true }));
+
+app.get('/health', async (req, res) => {
+  try {
+    await pool.query('SELECT 1');
+    res.json({ ok: true, database: 'connected' });
+  } catch (error) {
+    res.json({ ok: false, database: 'disconnected' });
+  }
+});
+
+app.get('/api/customers', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM customers ORDER BY created_at DESC');
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+app.get('/api/orders', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT o.*, c.name AS customer_name_full, c.email
+      FROM orders o
+      LEFT JOIN customers c ON c.id = o.customer_id
+      ORDER BY o.created_at DESC
+    `);
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+app.post('/api/customers', async (req, res) => {
+  try {
+    const { name, phone, email } = req.body;
+
+    if (!name || !normalizePhone(phone)) {
+      return res.status(400).json({ success: false, message: 'Ad ve telefon zorunludur.' });
+    }
+
+    const customer = await ensureCustomer({ name, phone, email });
+    res.status(201).json({ success: true, data: customer });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message || 'Müşteri eklenemedi.' });
+  }
+});
+
+app.post('/api/orders', async (req, res) => {
+  try {
+    const {
+      customerName,
+      customerPhone,
+      shippingAddress,
+      orderDetails,
+      totalAmount,
+      sendSms = true
+    } = req.body;
+
+    if (!customerName || !normalizePhone(customerPhone) || !shippingAddress) {
+      return res.status(400).json({
+        success: false,
+        message: 'Müşteri adı, telefon ve teslim adresi zorunludur.'
+      });
+    }
+
+    const customer = await ensureCustomer({
+      name: customerName,
+      phone: customerPhone,
+      email: req.body.email || null
+    });
+
+    const orderCode = `ORD-${Date.now().toString().slice(-8)}`;
+    const baseUrl = process.env.CLIENT_TRACKING_URL || 'http://localhost:3000/track';
+    const trackingLink = `${baseUrl}?code=${orderCode}`;
+
+    const result = await pool.query(`
+      INSERT INTO orders (
+        order_code,
+        customer_id,
+        customer_name,
+        customer_phone,
+        shipping_address,
+        order_details,
+        total_amount,
+        status,
+        tracking_link
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+      RETURNING *
+    `, [
+      orderCode,
+      customer.id,
+      customerName,
+      normalizePhone(customerPhone),
+      shippingAddress,
+      orderDetails || '',
+      Number(totalAmount) || 0,
+      'siparis_alindi',
+      trackingLink
+    ]);
+
+    const order = result.rows[0];
+
+    if (sendSms) {
+      await sendStatusSms(order);
+    }
+
+    res.status(201).json({ success: true, data: order });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message || 'Sipariş oluşturulamadı.' });
+  }
+});
+
+app.put('/api/orders/:id/status', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    if (!status || !STATUS_LABELS[status]) {
+      return res.status(400).json({ success: false, message: 'Geçersiz sipariş durumu.' });
+    }
+
+    const result = await pool.query(`
+      UPDATE orders
+      SET status = $1, updated_at = NOW()
+      WHERE id = $2
+      RETURNING *
+    `, [status, id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Sipariş bulunamadı.' });
+    }
+
+    const updatedOrder = result.rows[0];
+    await sendStatusSms(updatedOrder);
+
+    res.json({ success: true, data: updatedOrder });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message || 'Durum güncellenemedi.' });
+  }
+});
+
+app.get('/api/track', async (req, res) => {
+  try {
+    const { code } = req.query;
+
+    if (!code) {
+      return res.status(400).json({ success: false, message: 'Sipariş kodu gerekli.' });
+    }
+
+    const result = await pool.query(
+      `SELECT * FROM orders WHERE order_code = $1 LIMIT 1`,
+      [String(code).trim()]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Sipariş bulunamadı.' });
+    }
+
+    const order = result.rows[0];
+
+    res.json({
+      success: true,
+      data: {
+        orderCode: order.order_code,
+        customerPhone: order.customer_phone,
+        shippingAddress: order.shipping_address,
+        orderDetails: order.order_details || '',
+        status: order.status,
+        statusLabel: STATUS_LABELS[order.status] || order.status,
+        trackingLink: order.tracking_link
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Durum sorgulanırken hata oluştu.' });
+  }
+});
+
+// ---------- FRONTEND ----------
+function renderAdminPage() {
+  return `
+    <!DOCTYPE html>
+    <html lang="tr">
+      <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Satıcı Paneli</title>
+        <style>
+          :root {
+            --bg: #f4f7fb;
+            --panel: #fff;
+            --primary: #1d4ed8;
+            --primary-dark: #163ea8;
+            --text: #111827;
+            --muted: #6b7280;
+            --border: #dfe7f1;
+            --warning: #fef3c7;
+            --warning-text: #92400e;
+          }
+          * { box-sizing: border-box; }
+          body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+          }
+          .shell {
+            max-width: 1280px;
+            margin: 0 auto;
+            padding: 28px 20px 60px;
+          }
+          .topbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 18px;
+            margin-bottom: 20px;
+          }
+          .topbar h1 { margin: 0; }
+          .btn {
+            display: inline-block;
+            background: var(--primary);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            padding: 12px 16px;
+            font-weight: 700;
+            cursor: pointer;
+            text-decoration: none;
+          }
+          .btn:hover { background: var(--primary-dark); }
+          .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 24px;
+          }
+          .panel {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 22px;
+            box-shadow: 0 10px 25px rgba(17,24,39,0.04);
+          }
+          form { display: flex; flex-direction: column; gap: 12px; }
+          label { display: flex; flex-direction: column; gap: 8px; font-weight: 600; }
+          input, textarea, select {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            font-size: 15px;
+          }
+          table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 12px;
+          }
+          th, td {
+            padding: 12px 10px;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+          }
+          .status-select {
+            width: 100%;
+            padding: 8px 10px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+          }
+          @media (max-width: 640px) {
+            .topbar { flex-direction: column; align-items: flex-start; }
+          }
+        </style>
+      </head>
+      <body>
+        <div class="shell">
+          <header class="topbar">
+            <div>
+              <div style="font-size:12px; letter-spacing:0.08em; color:#6b7280; text-transform:uppercase;">Yönetim</div>
+              <h1>Sipariş Takip Sistemi</h1>
+            </div>
+            <a class="btn" href="/track">Müşteri Takip</a>
+          </header>
+
+          <div class="grid">
+            <section class="panel">
+              <h2>Müşteri Ekle</h2>
+              <form id="customerForm">
+                <label>Ad Soyad
+                  <input type="text" id="customerName" required />
+                </label>
+                <label>Telefon
+                  <input type="tel" id="customerPhone" required />
+                </label>
+                <label>E-posta
+                  <input type="email" id="customerEmail" />
+                </label>
+                <button type="submit" class="btn">Müşteri Ekle</button>
+              </form>
+            </section>
+
+            <section class="panel">
+              <h2>Sipariş Oluştur</h2>
+              <form id="orderForm">
+                <label>Müşteri Adı
+                  <input type="text" id="orderCustomerName" required />
+                </label>
+                <label>Telefon
+                  <input type="tel" id="orderCustomerPhone" required />
+                </label>
+                <label>Teslim Adresi
+                  <textarea id="shippingAddress" rows="3" required></textarea>
+                </label>
+                <label>Sipariş Detayı
+                  <textarea id="orderDetails" rows="3"></textarea>
+                </label>
+                <label>Toplam Tutar
+                  <input type="number" id="totalAmount" step="0.01" min="0" />
+                </label>
+                <button type="submit" class="btn">Sipariş Kaydet</button>
+              </form>
+            </section>
+          </div>
+
+          <section class="panel" style="margin-top: 28px;">
+            <h2>Müşteriler</h2>
+            <div id="customerTable"></div>
+          </section>
+
+          <section class="panel" style="margin-top: 28px;">
+            <h2>Siparişler</h2>
+            <div id="orderTable"></div>
+          </section>
+        </div>
+
+        <script>
+          const STATUS_OPTIONS = {
+            siparis_alindi: 'Sipariş Alındı',
+            hazirlaniyor: 'Hazırlanıyor',
+            yola_cikti: 'Yola Çıktı',
+            teslim_edildi: 'Teslim Edildi'
+          };
+
+          async function fetchJson(url, options = {}) {
+            const response = await fetch(url, {
+              headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+              ...options
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.message || 'İşlem başarısız.');
+            return data;
+          }
+
+          async function loadCustomers() {
+            const res = await fetchJson('/api/customers');
+            const rows = res.data.map(customer => `
+              <tr>
+                <td>${customer.id}</td>
+                <td>${customer.name}</td>
+                <td>${customer.phone}</td>
+                <td>${customer.email || '-'}</td>
+              </tr>
+            `).join('');
+
+            document.getElementById('customerTable').innerHTML = `
+              <table>
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Ad Soyad</th>
+                    <th>Telefon</th>
+                    <th>E-posta</th>
+                  </tr>
+                </thead>
+                <tbody>${rows || '<tr><td colspan=\"4\">Müşteri bulunamadı.</td></tr>'}</tbody>
+              </table>
+            `;
+          }
+
+          async function loadOrders() {
+            const res = await fetchJson('/api/orders');
+            const rows = res.data.map(order => `
+              <tr>
+                <td>${order.order_code}</td>
+                <td>${order.customer_name}</td>
+                <td>${order.customer_phone}</td>
+                <td>${STATUS_OPTIONS[order.status] || order.status}</td>
+                <td>
+                  <select class="status-select" data-id="${order.id}">
+                    ${Object.entries(STATUS_OPTIONS).map(([value, label]) => `
+                      <option value="${value}" ${value === order.status ? 'selected' : ''}>${label}</option>
+                    `).join('')}
+                  </select>
+                </td>
+                <td><a href="${order.tracking_link}" target="_blank">Takip Linki</a></td>
+              </tr>
+            `).join('');
+
+            document.getElementById('orderTable').innerHTML = `
+              <table>
+                <thead>
+                  <tr>
+                    <th>Sipariş Kodu</th>
+                    <th>Müşteri</th>
+                    <th>Telefon</th>
+                    <th>Durum</th>
+                    <th>Durum Güncelle</th>
+                    <th>Takip Linki</th>
+                  </tr>
+                </thead>
+                <tbody>${rows || '<tr><td colspan=\"6\">Sipariş bulunamadı.</td></tr>'}</tbody>
+              </table>
+            `;
+
+            document.querySelectorAll('.status-select').forEach(select => {
+              select.addEventListener('change', async (e) => {
+                const id = e.target.dataset.id;
+                const status = e.target.value;
+
+                try {
+                  await fetchJson(`/api/orders/${id}/status`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ status })
+                  });
+                  alert('Sipariş durumu güncellendi.');
+                  loadOrders();
+                } catch (error) {
+                  alert(error.message);
+                }
+              });
+            });
+          }
+
+          document.getElementById('customerForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const payload = {
+              name: document.getElementById('customerName').value.trim(),
+              phone: document.getElementById('customerPhone').value.trim(),
+              email: document.getElementById('customerEmail').value.trim()
+            };
+
+            try {
+              await fetchJson('/api/customers', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+              });
+              document.getElementById('customerForm').reset();
+              loadCustomers();
+              alert('Müşteri eklendi.');
+            } catch (error) {
+              alert(error.message);
+            }
+          });
+
+          document.getElementById('orderForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const payload = {
+              customerName: document.getElementById('orderCustomerName').value.trim(),
+              customerPhone: document.getElementById('orderCustomerPhone').value.trim(),
+              shippingAddress: document.getElementById('shippingAddress').value.trim(),
+              orderDetails: document.getElementById('orderDetails').value.trim(),
+              totalAmount: document.getElementById('totalAmount').value,
+              sendSms: true
+            };
+
+            try {
+              const result = await fetchJson('/api/orders', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+              });
+              alert(`Sipariş oluşturuldu: ${result.data.order_code}`);
+              document.getElementById('orderForm').reset();
+              loadOrders();
+            } catch (error) {
+              alert(error.message);
+            }
+          });
+
+          loadCustomers();
+          loadOrders();
+        </script>
+      </body>
+    </html>
+  `;
+}
+
+function renderTrackPage() {
+  return `
+    <!DOCTYPE html>
+    <html lang="tr">
+      <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Sipariş Takip</title>
+        <style>
+          :root {
+            --bg1: #eff6ff;
+            --bg2: #e0f2fe;
+            --card: #fff;
+            --primary: #0ea5e9;
+            --primary-dark: #0284c7;
+            --text: #0f172a;
+            --muted: #475569;
+            --border: #dfe7f1;
+          }
+          * { box-sizing: border-box; }
+          body {
+            margin: 0;
+            min-height: 100vh;
+            display: grid;
+            place-items: center;
+            font-family: Arial, sans-serif;
+            background: linear-gradient(135deg, var(--bg1), var(--bg2));
+            color: var(--text);
+          }
+          .card {
+            width: min(100%, 600px);
+            background: var(--card);
+            border-radius: 18px;
+            padding: 32px 24px;
+            box-shadow: 0 15px 35px rgba(15, 23, 42, 0.12);
+            border: 1px solid var(--border);
+          }
+          h1 { margin: 0 0 12px; }
+          p { color: var(--muted); line-height: 1.6; }
+          form { display: flex; flex-direction: column; gap: 18px; margin-top: 24px; }
+          label { display: flex; flex-direction: column; gap: 8px; font-weight: 700; }
+          input {
+            width: 100%;
+            padding: 12px 14px;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            font-size: 16px;
+          }
+          button {
+            border: none;
+            background: var(--primary);
+            color: white;
+            border-radius: 10px;
+            padding: 12px 18px;
+            font-size: 16px;
+            font-weight: 700;
+            cursor: pointer;
+          }
+          button:hover { background: var(--primary-dark); }
+          .result {
+            margin-top: 24px;
+            padding: 18px;
+            border-radius: 12px;
+            background: #f8fafc;
+            border: 1px solid #dbeafe;
+          }
+          .status-tag {
+            display: inline-block;
+            margin-top: 12px;
+            padding: 6px 10px;
+            border-radius: 999px;
+            background: #dbeafe;
+            color: #1d4ed8;
+            font-weight: 700;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <div style="font-size:12px; letter-spacing:0.08em; text-transform:uppercase; color:#475569;">Takip</div>
+          <h1>Sipariş Durumunu Kontrol Et</h1>
+          <p>SMS ile gelen linkten sipariş kodunu girerek durumu öğrenebilirsiniz.</p>
+
+          <form id="trackingForm">
+            <label>
+              Sipariş Kodu
+              <input type="text" id="orderCode" placeholder="Örn: ORD-12345678" required />
+            </label>
+            <button type="submit">Durumu Göster</button>
+          </form>
+
+          <div id="resultBox" class="result" style="display:none;"></div>
+        </div>
+
+        <script>
+          const form = document.getElementById('trackingForm');
+          const codeInput = document.getElementById('orderCode');
+          const resultBox = document.getElementById('resultBox');
+
+          const urlParams = new URLSearchParams(window.location.search);
+          const prefilled = urlParams.get('code');
+          if (prefilled) {
+            codeInput.value = prefilled;
+          }
+
+          form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const code = codeInput.value.trim();
+            if (!code) {
+              resultBox.style.display = 'block';
+              resultBox.innerHTML = '<p>Lütfen sipariş kodunu girin.</p>';
+              resultBox.style.background = '#fff1f2';
+              resultBox.style.borderColor = '#fecaca';
+              return;
+            }
+
+            try {
+              const res = await fetch(`/api/track?code=${encodeURIComponent(code)}`);
+              const data = await res.json();
+
+              if (!res.ok || !data.success) {
+                throw new Error(data.message || 'Sipariş bulunamadı.');
+              }
+
+              const d = data.data;
+              resultBox.style.display = 'block';
+              resultBox.innerHTML = `
+                <h3>Sipariş Bilgisi</h3>
+                <p><strong>Sipariş Kodu:</strong> ${d.orderCode}</p>
+                <p><strong>Müşteri Telefonu:</strong> ${d.customerPhone}</p>
+                <p><strong>Teslim Adresi:</strong> ${d.shippingAddress}</p>
+                <p><strong>Sipariş Notu:</strong> ${d.orderDetails || 'Belirtilmemiş'}</p>
+                <div class="status-tag">${d.statusLabel}</div>
+              `;
+            } catch (error) {
+              resultBox.style.display = 'block';
+              resultBox.innerHTML = `<p>${error.message}</p>`;
+              resultBox.style.background = '#fff1f2';
+              resultBox.style.borderColor = '#fecaca';
+            }
+          });
+        </script>
+      </body>
+    </html>
+  `;
+}
+
+app.get('/admin', (req, res) => res.send(renderAdminPage()));
+app.get('/track', (req, res) => res.send(renderTrackPage()));
+
+app.get('/', (req, res) => {
+  res.redirect('/admin');
+});
+
+(async () => {
+  try {
+    await initDb();
+    console.log('Database initialized.');
+  } catch (error) {
+    console.warn('Database init warning:', error.message);
+  }
+
+  app.listen(port, () => {
+    console.log(`Server running on http://localhost:${port}`);
+    console.log(`Admin: http://localhost:${port}/admin`);
+    console.log(`Tracking: http://localhost:${port}/track`);
+  });
+})();
